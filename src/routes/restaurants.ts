@@ -1,5 +1,5 @@
 import express from "express";
-import { validate } from "../middlewarea/validate";
+import { validate } from "../middleware/validate";
 import { RestaurantSchema, Restaurent } from "../schemas/restaurant";
 
 const router = express.Router();

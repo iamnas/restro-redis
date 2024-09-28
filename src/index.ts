@@ -1,7 +1,7 @@
 import express from 'express';
 import restaurantsRouter from "./routes/restaurants";
 import cuisinesRouter from "./routes/cuisines"
-import { errorHandler } from './middlewarea/errorHandler';
+import { errorHandler } from './middleware/errorHandler';
 
 
 const PORT = process.env.PORT || 3000;
