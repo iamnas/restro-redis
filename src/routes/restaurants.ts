@@ -1,14 +1,21 @@
-import express from 'express';
+import express from "express";
+import { validate } from "../middlewarea/validate";
+import { RestaurantSchema, Restaurent } from "../schemas/restaurant";
 
 const router = express.Router();
 
+router.get("/", (req, res) => {
+  res.status(200).json({
+    message: "Success",
+  });
+});
 
-router.get('/', (req, res) => {
+router.post("/", validate(RestaurantSchema), async (req, res) => {
+  const data = req.body as Restaurent;
 
-    res.status(200).json({
-        message:"Success"
-    })
-
+  res.status(200).json({
+    message: "Success",
+  });
 });
 
 export default router;
