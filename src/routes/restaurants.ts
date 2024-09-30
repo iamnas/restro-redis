@@ -1,15 +1,22 @@
 import express, { type Request } from "express";
 import { validate } from "../middleware/validate";
-import { RestaurantSchema, Restaurent } from "../schemas/restaurant";
+import {
+  RestaurantSchema,
+  Restaurent,
+  RestaurentDetails,
+} from "../schemas/restaurant";
 import { initilizeRedisClient } from "../utils/client";
 import { nanoid } from "nanoid";
 import {
   cuisineKey,
   cuisinesKey,
   restaurantCuisinesKeyById,
+  restaurantDetailsKeyById,
   restaurantKeyById,
+  restaurantsByRatingKey,
   reviewDetailsKeysById,
   reviewKeyById,
+  weatherKeyById,
 } from "../utils/keys";
 import { errorResponse, successResponse } from "../utils/responses";
 import { checkRestaurantExists } from "../middleware/checkRestaurantId";
@@ -17,10 +24,24 @@ import { Review, ReviewSchema } from "../schemas/review";
 
 const router = express.Router();
 
-router.get("/", (req, res) => {
-  res.status(200).json({
-    message: "Success",
-  });
+router.get("/", async (req: Request<{ id: string }>, res, next) => {
+  const { page = 1, limit = 10 } = req.query;
+
+  const start = (Number(page) - 1) * Number(limit);
+  const end = start + Number(limit) - 1;
+
+  try {
+    const client = await initilizeRedisClient();
+    const restIds = await client.zRange(restaurantsByRatingKey, start, end, {
+      REV: true,
+    });
+    const rests = await Promise.all(
+      restIds.map((id) => client.hGetAll(restaurantKeyById(id)))
+    );
+    successResponse(res, rests);
+  } catch (error) {
+    next(error);
+  }
 });
 
 router.post("/", validate(RestaurantSchema), async (req, res, next) => {
@@ -40,6 +61,10 @@ router.post("/", validate(RestaurantSchema), async (req, res, next) => {
         ])
       ),
       client.hSet(restaurantKey, hashData),
+      client.zAdd(restaurantsByRatingKey, {
+        score: 0,
+        value: id,
+      }),
     ]);
     console.log(`Added ${addResult} fields`);
 
@@ -48,6 +73,85 @@ router.post("/", validate(RestaurantSchema), async (req, res, next) => {
     next(error);
   }
 });
+
+router.post(
+  "/:restaurantId/details",
+  checkRestaurantExists,
+  validate(RestaurantSchema),
+  async (req: Request<{ restaurantId: string }>, res, next) => {
+    const { restaurantId } = req.params;
+    const data = req.body as RestaurentDetails;
+
+    try {
+      const client = await initilizeRedisClient();
+      const restaurantDetailsKey = restaurantDetailsKeyById(restaurantId);
+      await client.json.set(restaurantDetailsKey, ".", data);
+      successResponse(res, {}, "Restaurant Details added");
+      // return ;
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+router.get(
+  "/:restaurantId/details",
+  checkRestaurantExists,
+  async (req: Request<{ restaurantId: string }>, res, next) => {
+    const { restaurantId } = req.params;
+    const data = req.body as RestaurentDetails;
+
+    try {
+      const client = await initilizeRedisClient();
+      const restaurantDetailsKey = restaurantDetailsKeyById(restaurantId);
+      const details = await client.json.get(restaurantDetailsKey);
+      successResponse(res, details);
+      // return ;
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+router.get(
+  "/:id/weather",
+  checkRestaurantExists,
+  async (req: Request<{ id: string }>, res, next) => {
+    const { id } = req.params;
+
+    try {
+      const client = await initilizeRedisClient();
+      const weatherKey = weatherKeyById(id);
+      const cachedWeather = await client.get(weatherKey);
+      if (cachedWeather) {
+        console.log("Cache Hit");
+        successResponse(res, JSON.parse(cachedWeather));
+      }
+      const restaurantKey = restaurantKeyById(id);
+      const coords = await client.hGet(restaurantKey, "location");
+      if (!coords) {
+        errorResponse(res, 404, "Coordinates not found");
+        return;
+      }
+      const [lng, lat] = coords.split(",");
+      const apiResponse = await fetch(
+        `https://api.openweathermap.org/data/2.5/weather?units=imperial&lat=${lat}&lon=${lng}&appid=${process.env.WEATHER_API_KEY}`
+      );
+      if (apiResponse.status === 200) {
+        const json = await apiResponse.json();
+        await client.set(weatherKey, JSON.stringify(json), {
+          EX: 60 * 60,
+        });
+        successResponse(res, json);
+        return;
+      }
+      errorResponse(res, 500, "Couldnt fetch weather info");
+      return;
+    } catch (error) {
+      next(error);
+    }
+  }
+);
 
 router.post(
   "/:id/reviews",
@@ -62,6 +166,7 @@ router.post(
       const reviewId = nanoid();
       const reviewKey = reviewKeyById(id);
       const reviewDetailsKeys = reviewDetailsKeysById(reviewId);
+      const restaurantKey = restaurantKeyById(id);
 
       const reviewData = {
         id: reviewId,
@@ -70,11 +175,21 @@ router.post(
         restaurantId: id,
       };
 
-      await Promise.all([
+      const [reviewCount, setResult, totalStarts] = await Promise.all([
         client.lPush(reviewKey, reviewId),
         client.hSet(reviewDetailsKeys, reviewData),
+        client.hIncrByFloat(restaurantKey, "totalStarts", data.rating),
       ]);
 
+      const averageRating = Number((totalStarts / reviewCount).toFixed(1));
+
+      await Promise.all([
+        client.zAdd(restaurantsByRatingKey, {
+          score: averageRating,
+          value: id,
+        }),
+        client.hSet(restaurantKey, "avgStars", averageRating),
+      ]);
       successResponse(res, reviewData, "Review Added");
     } catch (error) {
       next(error);
@@ -141,12 +256,12 @@ router.get(
     try {
       const client = await initilizeRedisClient();
       const restaurantKey = restaurantKeyById(id);
-      const [viewCount, restaurant,cuisines] = await Promise.all([
+      const [viewCount, restaurant, cuisines] = await Promise.all([
         client.hIncrBy(restaurantKey, "viewCount", 1),
         client.hGetAll(restaurantKey),
-        client.sMembers(restaurantCuisinesKeyById(id))
+        client.sMembers(restaurantCuisinesKeyById(id)),
       ]);
-      successResponse(res, {...restaurant,cuisines});
+      successResponse(res, { ...restaurant, cuisines });
     } catch (error) {
       next(error);
     }
